@@ -1,0 +1,91 @@
+# Third-party actions are pinned to full commit SHAs (tags are mutable); the
+# comment after each SHA names the release it was resolved from. Update with:
+#   git ls-remote https://github.com/<owner>/<action> refs/tags/<tag>
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint and type check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - run: ruff check src tests
+      - run: ruff format --check src tests
+      - run: mypy
+
+  test:
+    name: Tests (Python ${{ matrix.python-version }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+        include:
+          - os: windows-latest
+            python-version: "3.13"
+          - os: macos-latest
+            python-version: "3.13"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - run: pytest --cov --cov-report=term-missing --cov-fail-under=85
+
+  package:
+    name: Build, install in a clean environment, smoke-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - name: Build wheel and sdist
+        run: |
+          pip install build
+          python -m build
+      - name: Install the wheel into a clean environment
+        run: |
+          python -m venv /tmp/wheel-env
+          /tmp/wheel-env/bin/pip install dist/*.whl
+      - name: CLI smoke test
+        run: |
+          /tmp/wheel-env/bin/web-visibility --version
+          /tmp/wheel-env/bin/web-visibility --version | grep -q "report schema 2"
+          /tmp/wheel-env/bin/web-visibility --help
+          /tmp/wheel-env/bin/web-visibility audit --help
+          /tmp/wheel-env/bin/python -m web_visibility --version
+      - name: Audit the fixture site with the installed CLI
+        run: |
+          python -u tests/fixture_server.py > /tmp/server.log 2>&1 &
+          for _ in $(seq 1 50); do grep -q "running at" /tmp/server.log && break; sleep 0.1; done
+          URL=$(grep -o 'http://127.0.0.1:[0-9]*/' /tmp/server.log)
+          /tmp/wheel-env/bin/web-visibility audit "$URL" --allow-private-network --delay 0 --output /tmp/reports
+          test -f /tmp/reports/*/audit.json
+          test -f /tmp/reports/*/audit.md

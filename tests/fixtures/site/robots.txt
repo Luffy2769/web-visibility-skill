@@ -1,0 +1,5 @@
+# Fixture robots.txt - {{BASE}} is replaced with the server's base URL.
+User-agent: *
+Disallow: /private/
+
+Sitemap: {{BASE}}/sitemap.xml
