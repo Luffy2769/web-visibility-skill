@@ -244,6 +244,10 @@ completely (limits reached, files failing), checks that need the full list are s
   fallbacks (e.g. `googlebot-image` → `googlebot`) are not modelled.
 - **Canonical placement** detection approximates browser head-closing rules.
   Ambiguous cases are reported with confidence 0.5.
+- **Parser version differences**: HTML is parsed with Python's `html.parser`, which
+  changed in Python 3.13. Markup inside `<title>` (e.g. `<title>a <b>b</b></title>`)
+  is kept as text on 3.13+, as browsers do, but parsed as tags on 3.11/3.12, so the
+  extracted title can differ. Well-formed pages are unaffected.
 - **Structured data** is checked for JSON-LD syntax and `@type` only; Schema.org
   validation is Phase 02. Microdata and RDFa are detected but not parsed.
 - **Same-site redirects**: only host changes involving `www.` (and scheme changes)

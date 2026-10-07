@@ -90,7 +90,10 @@ def test_valid_json_ld_has_no_issues_and_types_are_inventoried() -> None:
 def test_invalid_json_ld() -> None:
     issues = run_schema('<script type="application/ld+json">{"@type": "Organization",}</script>')
     invalid = by_id(issues, "invalid-json-ld")[0]
-    assert "trailing comma" in invalid.evidence.lower()
+    # The json module's wording differs by Python version ("Illegal trailing comma"
+    # on 3.13+, "Expecting property name" before), so assert the stable parts.
+    assert "invalid JSON" in invalid.evidence
+    assert "(line 1, column" in invalid.evidence
 
 
 def test_missing_context_and_type() -> None:

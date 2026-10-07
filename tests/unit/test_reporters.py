@@ -94,9 +94,17 @@ def test_json_issue_and_page_fields() -> None:
 
 
 def test_json_round_trips_hostile_content() -> None:
-    parsed = json.loads(to_json(sample_report()))
-    titles = [p.get("title") for p in parsed["pages"]]
-    assert HOSTILE_TITLE.replace("\x1b", "\x1b") in titles
+    """Site text reaches JSON unchanged, as data. Compared with what the parser
+    extracted rather than a literal: html.parser keeps ``<script>`` inside
+    ``<title>`` as text on Python 3.13+ (as browsers do) but parses it as a tag
+    on 3.11/3.12."""
+    report = sample_report()
+    extracted = {p.title for p in report.crawl.pages if p.title and "pwned" in p.title}
+    assert extracted
+    titles = {p.get("title") for p in json.loads(to_json(report))["pages"]}
+    assert extracted <= titles
+    title = next(iter(extracted))
+    assert "[bold red]pwned[/]" in title and "\x1b[2J" in title
 
 
 def test_markdown_sections_and_escaping() -> None:
