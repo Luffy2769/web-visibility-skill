@@ -6,7 +6,7 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
-from web_visibility.models import CrawlResult, Issue, Page
+from web_visibility.models import CrawlResult, Issue, Page, is_definitive_response
 from web_visibility.urls import same_host
 
 Analyzer = Callable[["AuditContext"], list[Issue]]
@@ -25,10 +25,21 @@ class TargetStatus:
     error: str | None
     error_kind: str | None
 
+    @property
+    def definitive(self) -> bool:
+        """The response proves the target works or is broken (see ``is_definitive_response``)."""
+        return is_definitive_response(self.status_code, self.error_kind)
+
 
 @dataclass(frozen=True, slots=True)
 class LinkCoverage:
-    """How many distinct link targets exist and how many have a known response."""
+    """How many distinct link targets exist and how many have a *definitive* response.
+
+    ``*_checked`` counts only answers that prove a target works or is broken.
+    ``*_unverifiable`` counts targets that were requested but answered with a
+    timeout, network error, SSRF block or 401/403/407/429: they are neither
+    passing nor failing, and are never counted as checked.
+    """
 
     internal_discovered: int
     internal_checked: int
@@ -36,6 +47,8 @@ class LinkCoverage:
     external_checked: int
     not_applicable: int
     """Targets deliberately not fetched (robots.txt disallowed)."""
+    internal_unverifiable: int = 0
+    external_unverifiable: int = 0
 
 
 @dataclass(frozen=True)
@@ -132,17 +145,18 @@ class AuditContext:
         return targets
 
     def link_coverage(self) -> LinkCoverage:
-        counts = {"int": 0, "int_ok": 0, "ext": 0, "ext_ok": 0, "na": 0}
+        counts = {"int": 0, "int_ok": 0, "int_unv": 0, "ext": 0, "ext_ok": 0, "ext_unv": 0, "na": 0}
         for target, internal in self.link_targets().items():
             if self.crawl.skipped.get(target, "").startswith("robots"):
                 counts["na"] += 1
                 continue
             key = "int" if internal else "ext"
             counts[key] += 1
-            if self.target_status(target) is not None:
-                counts[f"{key}_ok"] += 1
+            status = self.target_status(target)
+            if status is not None:
+                counts[f"{key}_ok" if status.definitive else f"{key}_unv"] += 1
         return LinkCoverage(counts["int"], counts["int_ok"], counts["ext"], counts["ext_ok"],
-                            counts["na"])  # fmt: skip
+                            counts["na"], counts["int_unv"], counts["ext_unv"])  # fmt: skip
 
     def inbound_sources(self, page: Page) -> frozenset[str]:
         """Auditable pages linking to ``page`` (by requested or final URL)."""

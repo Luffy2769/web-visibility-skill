@@ -27,7 +27,15 @@ from web_visibility.analyzers.base import (
     quoted_list,
     sample,
 )
-from web_visibility.models import Category, Issue, Link, Page, Rule, Severity
+from web_visibility.models import (
+    DEFINITIVE_ERROR_KINDS,
+    Category,
+    Issue,
+    Link,
+    Page,
+    Rule,
+    Severity,
+)
 from web_visibility.urls import same_host
 
 C = Category.LINKS
@@ -151,9 +159,13 @@ class LinkVerdict:
 
 
 def classify_target(status: TargetStatus) -> LinkVerdict | None:
-    """Interpret a response. ``None`` means the target works (2xx after redirects)."""
-    if status.error is not None:
-        if status.error_kind in ("redirect-loop", "too-many-redirects"):
+    """Interpret a response. ``None`` means the target works (2xx after redirects).
+
+    A response with a status code is classified by that code even if the body was
+    then rejected (too large, unparseable): the link itself answered.
+    """
+    if status.error is not None and status.status_code is None:
+        if status.error_kind in DEFINITIVE_ERROR_KINDS:  # loops, malformed Location
             return LinkVerdict(True, Severity.MEDIUM, 0.85, status.error)
         reason = {
             "blocked": "not fetched: the target resolves to a non-public address",

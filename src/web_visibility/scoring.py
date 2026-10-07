@@ -9,10 +9,14 @@ Coverage first. Every category records what it could inspect:
 * ``scored``      - every applicable item was checked
 * ``partial``     - some applicable items were checked (score covers those only)
 * ``not-scored``  - applicable items exist but none was checked (e.g. links
-  found but none verified, or the crawl failed): **N/A**, and the score is partial
+  found but none verified, or the crawl failed), **or fewer items were measured
+  than could not be measured** (pages behind bot protection, client-rendered
+  shells, link targets answering 403 or timing out): **N/A**, score is partial
 * ``not-applicable`` - there is nothing to check (no images, no links): **N/A**,
   but the audit can still be complete
-Neither N/A status is counted in the overall score - never as 100%.
+Neither N/A status is counted in the overall score - never as 100%. Something the
+auditor could not observe is never counted as checked (``Page.unretrieved``,
+``TargetStatus.definitive``).
 
 Penalties (per scored category):
 
@@ -26,7 +30,10 @@ rules (only the category floor of 0 caps them), so dozens of failures are never
 hidden behind a single capped rule.
 
 Overall = 100 x (points of scored/partial categories) / (their maximum), rounded.
-It is ``None`` when no category could be scored.
+It is ``None`` when no category could be scored, and is withheld (status
+``insufficient-coverage``) when the scored categories carry less than
+``MIN_SCORED_WEIGHT`` of the model: a number computed from a small corner of the
+checks would read as a verdict on the whole site.
 """
 
 from __future__ import annotations
@@ -63,7 +70,10 @@ SEVERITY_WEIGHTS: dict[Severity, float] = {
 }
 
 CoverageStatus = Literal["scored", "partial", "not-scored", "not-applicable"]
-ScoreStatus = Literal["complete", "partial", "not-scored"]
+ScoreStatus = Literal["complete", "partial", "insufficient-coverage", "not-scored"]
+
+#: Minimum total weight (of 100) of scored categories needed for an overall score.
+MIN_SCORED_WEIGHT = 50
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,7 +123,9 @@ class Score:
     pages_scored: int
     status: ScoreStatus
     scored_weight: int
-    """Sum of the weights of categories that contributed to ``overall`` (max 100)."""
+    """Sum of the weights of categories that were scored (max 100)."""
+    reason: str | None = None
+    """Why ``overall`` is withheld or partial, in words."""
 
     @property
     def scored(self) -> bool:
@@ -121,9 +133,14 @@ class Score:
 
 
 def measure_coverage(ctx: AuditContext, issues: list[Issue]) -> dict[Category, Coverage]:
-    """What each category could inspect on this crawl."""
+    """What each category could inspect on this crawl.
+
+    Pages the auditor could not observe (``Page.unretrieved``) and client-rendered
+    shells count as applicable but unmeasured; they never count as checked.
+    """
     pages = len(ctx.pages)
     shells = sum(1 for p in ctx.pages if p.likely_client_rendered)
+    unretrieved = len(ctx.crawl.unretrieved_pages)
     pending = len(ctx.crawl.pending)
     failed = _failed_items(issues)
     coverage: dict[Category, Coverage] = {}
@@ -135,30 +152,22 @@ def measure_coverage(ctx: AuditContext, issues: list[Issue]) -> dict[Category, C
         return coverage
 
     crawled = len(ctx.crawl.pages)
-    tech_partial = bool(pending or ctx.crawl.stop_reason)
-    coverage[Category.TECHNICAL] = Coverage(
-        "partial" if tech_partial else "scored",
-        "URLs",
-        crawled + pending,
-        crawled,
-        failed[Category.TECHNICAL],
-        _pending_reason(ctx) if tech_partial else None,
-    )
+    gaps = [_unretrieved_reason(ctx)] if unretrieved else []
+    limits = [_pending_reason(ctx)] if pending or ctx.crawl.stop_reason else []
+    coverage[Category.TECHNICAL] = _coverage(
+        "URLs", crawled + pending, crawled - unretrieved, unretrieved,
+        failed[Category.TECHNICAL], gaps + limits,
+    )  # fmt: skip
 
-    page_reason = None
-    if shells:
-        page_reason = f"{shells} of {pages} pages appear client-rendered (JavaScript not run)"
-    elif pending:
-        page_reason = _pending_reason(ctx)
+    shell_note = [f"{shells} of {pages} pages appear client-rendered (JavaScript not run)"]
+    page_reasons = (
+        (shell_note if shells else []) + gaps + ([_pending_reason(ctx)] if pending else [])
+    )
     for category in (Category.METADATA, Category.STRUCTURE, Category.STRUCTURED_DATA):
-        coverage[category] = Coverage(
-            "partial" if page_reason else "scored",
-            "pages",
-            pages + pending,
-            pages - shells,
-            failed[category],
-            page_reason,
-        )
+        coverage[category] = _coverage(
+            "pages", pages + unretrieved + pending, pages - shells, shells + unretrieved,
+            failed[category], page_reasons,
+        )  # fmt: skip
 
     coverage[Category.LINKS] = _link_coverage(ctx, failed[Category.LINKS])
 
@@ -168,15 +177,25 @@ def measure_coverage(ctx: AuditContext, issues: list[Issue]) -> dict[Category, C
             "not-applicable", "images", 0, 0, 0, "no images on the audited pages"
         )
     else:
-        coverage[Category.IMAGES] = Coverage(
-            "partial" if pending else "scored",
-            "images",
-            image_count,
-            image_count,
-            failed[Category.IMAGES],
-            _pending_reason(ctx) if pending else None,
+        image_reasons = gaps + ([_pending_reason(ctx)] if pending else [])
+        coverage[Category.IMAGES] = _coverage(
+            "images", image_count, image_count, 0, failed[Category.IMAGES], image_reasons
         )
     return coverage
+
+
+def _coverage(
+    unit: str, applicable: int, checked: int, unmeasured: int, failed: int, reasons: list[str]
+) -> Coverage:
+    """``not-scored`` when nothing was checked, or less than could not be measured."""
+    reason = "; ".join(reasons) or None
+    if checked <= 0:
+        return Coverage("not-scored", unit, applicable, 0, 0, reason or "nothing was checked")
+    if checked < unmeasured:
+        why = f"only {checked} of {checked + unmeasured} {unit} could be measured"
+        return Coverage("not-scored", unit, applicable, checked, failed,
+                        f"{why} ({reason})" if reason else why)  # fmt: skip
+    return Coverage("partial" if reason else "scored", unit, applicable, checked, failed, reason)
 
 
 def compute_score(
@@ -214,13 +233,24 @@ def compute_score(
 
     scored = [c for c in categories if c.points is not None]
     scored_weight = sum(c.max_points for c in scored)
-    if not scored:
-        return Score(None, tuple(categories), pages_audited, "not-scored", 0)
+    if pages_audited == 0:  # the crawl failed: nothing was audited at all
+        reason = "no page could be audited"
+        return Score(None, tuple(categories), pages_audited, "not-scored", 0, reason)
+    unscored = [c.category.label for c in categories if c.coverage.status == "not-scored"]
+    if scored_weight < MIN_SCORED_WEIGHT:
+        reason = (
+            f"only {scored_weight}/100 of the score model could be measured "
+            f"({', '.join(unscored) or 'most categories'} not scored), so an overall "
+            "number would misrepresent the site"
+        )
+        return Score(None, tuple(categories), pages_audited, "insufficient-coverage",
+                     scored_weight, reason)  # fmt: skip
     overall = round(100 * sum(c.points or 0.0 for c in scored) / scored_weight)
-    complete = all(c.coverage.status in ("scored", "not-applicable") for c in categories)
+    incomplete = [c.category.label for c in categories
+                  if c.coverage.status in ("partial", "not-scored")]  # fmt: skip
     return Score(
-        overall, tuple(categories), pages_audited, "complete" if complete else "partial",
-        scored_weight,
+        overall, tuple(categories), pages_audited, "partial" if incomplete else "complete",
+        scored_weight, f"partial coverage in: {', '.join(incomplete)}" if incomplete else None,
     )  # fmt: skip
 
 
@@ -245,15 +275,25 @@ def _link_coverage(ctx: AuditContext, failed: int) -> Coverage:
     external = ctx.crawl.config.check_external
     applicable = links.internal_discovered + (links.external_discovered if external else 0)
     checked = links.internal_checked + (links.external_checked if external else 0)
+    unverifiable = links.internal_unverifiable + (links.external_unverifiable if external else 0)
     if applicable == 0:
         return Coverage("not-applicable", "link targets", 0, 0, 0, "no links to other pages found")
     if checked == 0:
         reason = "link validation was not performed (no link target was checked)"
+        if unverifiable:
+            reason = (
+                f"no link target gave a definitive answer ({unverifiable} answered "
+                "401/403/429 or failed at the network level)"
+            )
         return Coverage("not-scored", "link targets", applicable, 0, 0, reason)
-    if checked < applicable:
-        reason = f"{applicable - checked} of {applicable} link targets unchecked"
-        return Coverage("partial", "link targets", applicable, checked, failed, reason)
-    return Coverage("scored", "link targets", applicable, checked, failed)
+    reasons = []
+    if unverifiable:
+        reasons.append(f"{unverifiable} link target(s) could not be verified (401/403/429/network)")
+    if checked + unverifiable < applicable:
+        reasons.append(
+            f"{applicable - checked - unverifiable} of {applicable} link targets unchecked"
+        )
+    return _coverage("link targets", applicable, checked, unverifiable, failed, reasons)
 
 
 def _failed_items(issues: list[Issue]) -> dict[Category, int]:
@@ -269,6 +309,11 @@ def _failed_items(issues: list[Issue]) -> dict[Category, int]:
         else:
             affected[issue.category].update(issue.affected_urls or ("(site)",))
     return {category: len(affected[category]) for category in CATEGORY_WEIGHTS}
+
+
+def _unretrieved_reason(ctx: AuditContext) -> str:
+    count = len(ctx.crawl.unretrieved_pages)
+    return f"{count} crawled page(s) could not be retrieved or analyzed"
 
 
 def _pending_reason(ctx: AuditContext) -> str:

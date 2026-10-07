@@ -6,7 +6,7 @@ robots.txt and sitemap checks live in :mod:`web_visibility.analyzers.crawlabilit
 from __future__ import annotations
 
 from web_visibility.analyzers.base import AuditContext, joined_list, plural, sample
-from web_visibility.models import Category, Issue, Page, Rule, Severity
+from web_visibility.models import UNRETRIEVED_STATUSES, Category, Issue, Page, Rule, Severity
 from web_visibility.safety import is_local_host
 from web_visibility.urls import host_of, same_origin
 
@@ -73,10 +73,17 @@ CRAWL_STOPPED = Rule(
     "Re-run later, or with the site owner's agreement on crawl rate, for a complete audit.",
 )  # fmt: skip
 
+PAGES_DENIED = Rule(
+    "pages-access-denied", C, Severity.INFO, "Pages refused the auditor (401/403/429)",
+    "Not necessarily a defect: bot protection or authentication often answers automated "
+    "requests this way. These pages were not audited; allow the auditor (for a site you own) "
+    "or audit them another way before drawing conclusions about them.",
+)  # fmt: skip
+
 RULES = (
     START_URL_FAILED, HTTPS_NOT_USED, MIXED_CONTENT, REDIRECT_CHAIN, PAGE_FETCH_ERROR,
     CRAWLED_PAGE_ERROR, CLIENT_RENDERED, NOINDEX_START, NOINDEX_PAGE, NOFOLLOW_PAGE,
-    PAGE_TOO_LARGE, CRAWL_LIMIT, CRAWL_STOPPED,
+    PAGE_TOO_LARGE, CRAWL_LIMIT, CRAWL_STOPPED, PAGES_DENIED,
 )  # fmt: skip
 
 _ERROR_IGNORED_STATUSES = frozenset({401, 403, 429})  # access control / rate limit, not "broken"
@@ -271,6 +278,16 @@ def _page_issues(ctx: AuditContext, page: Page) -> list[Issue]:
 
 def _coverage_notes(ctx: AuditContext) -> list[Issue]:
     issues: list[Issue] = []
+    denied = [p for p in ctx.crawl.pages if p.status_code in UNRETRIEVED_STATUSES]
+    if denied:
+        entries = [f"{p.requested_url} (HTTP {p.status_code})" for p in denied]
+        issues.append(PAGES_DENIED.issue(
+            description=f"{plural(len(denied), 'crawled page')} answered with an access or "
+                        "rate-limit status, so their content was not audited. They count as "
+                        "unmeasured in the coverage, not as passing.",
+            evidence=joined_list(entries), confidence=1.0,
+            details={"statuses": {p.requested_url: p.status_code for p in denied}},
+        ))  # fmt: skip
     pending = ctx.crawl.pending
     if pending and not ctx.crawl.stop_reason:
         issues.append(CRAWL_LIMIT.issue(

@@ -64,11 +64,15 @@ on a redirect hop, DNS timeout).
 - Measured (Python 3.14, 1 MB limit): a gzip bomb inflating to 40 MB (39 KB on
   the wire) and one inflating to 200 MB (194 KB) both peak at about 3.2 MB of
   traced memory, so memory does not grow with the payload. The regression test
-  is `TestH1DecompressionLimits`. Before v0.2.0 the same 60 MB payload peaked at
-  about 141 MB.
+  is `TestH1DecompressionLimits`. Over a real local socket with a 2 MB limit, a
+  bomb inflating to 150 MB (145 KB on the wire) peaked at 9.2 MB (network buffers
+  add to the limit). Before v0.2.0 a 60 MB payload peaked at about 141 MB.
 - Only `gzip` and `deflate` are requested. Any other `Content-Encoding` (for
   example `br`) is reported as an error rather than decoded.
 - Sitemaps: up to 50 MB (the protocol maximum) downloaded or inflated from `.gz`.
+- Response headers: h11 refuses oversized header blocks (a 1 MB header, or 2,000
+  1 KB headers, end the request with an error). Regression tests:
+  `tests/security/test_resource_limits_live.py`.
 - robots.txt: up to 500 KiB parsed (RFC 9309 minimum).
 
 **Not protected:** HTML *parsing* of a page just under the limit costs memory
@@ -83,7 +87,7 @@ A crawl holds every audited page's extracted data in memory (bounded by
   stall a request indefinitely.
 - Redirects: 5 hops, with loop detection.
 - Minimum delay between requests (default 0.25 s), raised to the site's
-  robots.txt `Crawl-delay` (up to 30 s). Above 30 s, only the start page is fetched.
+  robots.txt `Crawl-delay` (up to 30 s). Above 30 s, only robots.txt and the start page are requested (no sitemaps, no link checks; the remaining link targets are listed as unchecked).
 - `Retry-After` on 429/503 is honoured once if 30 s or less. Otherwise a 429
   stops the crawl.
 - Bounded crawl: `--max-pages` (default 20), link checks (default 50), external
@@ -95,8 +99,21 @@ A crawl holds every audited page's extracted data in memory (bounded by
   entity declaration or external reference **anywhere** in the document (not
   only at the start). This rules out entity-expansion and external-entity (XXE)
   attacks, and no entity is ever resolved over the network. Size is bounded
-  before parsing (above).
+  before parsing (above). The document is **streamed** (`iterparse`): nesting
+  deeper than 32 elements is rejected as soon as it is seen, and each entry is
+  released once its `<loc>` is read. Measured (Python 3.14): a 7 MB document of
+  2,000,000 nested elements (no DTD needed) peaked at 563 MB before this and at
+  2 MB after; a legitimate 1,000,000-entry, 50 MB sitemap went from 302 MB to 85 MB.
+- **robots.txt patterns** are matched in linear time (greedy segment matching for
+  `*` and `$`), not with a backtracking regex. Before v0.2.0's audit #2 fixes, a
+  rule such as `/*a*a*a*a*a*a*a*a*b` plus a crafted link took 39 s per check and a
+  slightly longer rule hung the audit indefinitely.
 - **HTML:** parsed with Python's `html.parser`, never executed. No JavaScript runs.
+  The parsed tree is walked once, iteratively, and per-element text extraction is
+  bounded (64 nodes / 300 characters), so hostile deep nesting costs linear time:
+  20,000 nested links parse in about 1 s (an earlier v0.2 draft with per-element
+  ancestor lookups took minutes). Regression test:
+  `test_deeply_nested_markup_parses_in_linear_time`.
 - **Terminal output:** site-derived text has control, ANSI-escape and bidi
   characters stripped, and is rendered as literal text, never as Rich markup.
 - **Markdown output:** site-derived text is escaped so it cannot inject HTML or

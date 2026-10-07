@@ -65,8 +65,15 @@ def _executive_summary(report: AuditReport) -> str:
             "computed. This is not evidence that the site is empty or broken; see the "
             "issues below for the reason."
         )
+    elif report.score.overall is None:
+        lines.append(
+            f"Audited **{report.pages_audited}** page(s) of {md_code(crawl.start_url)}. "
+            f"**PARTIAL AUDIT - no {SCORE_NAME} was computed:** "
+            f"{md(report.score.reason or 'coverage was insufficient')}. The findings below "
+            "describe only what could be observed."
+        )
     else:
-        partial = " (partial coverage)" if report.score.status == "partial" else ""
+        partial = " (PARTIAL coverage)" if report.score.status == "partial" else ""
         lines.append(
             f"Audited **{report.pages_audited}** page(s) of "
             f"{md_code(crawl.start_url)}. **{SCORE_NAME}: "
@@ -98,10 +105,20 @@ def _executive_summary(report: AuditReport) -> str:
 def _score(report: AuditReport) -> str:
     if not report.auditable:
         return ""
+    score = report.score
+    if score.overall is None:
+        headline = f"**{SCORE_NAME}: not computed** ({md(score.reason or score.status)})"
+    elif score.status == "partial":
+        headline = (
+            f"**{SCORE_NAME}: {score.overall}/100 - PARTIAL** "
+            f"({md(score.reason or '')}; {score.scored_weight}/100 of the model scored)"
+        )
+    else:
+        headline = f"**{SCORE_NAME}: {score.overall}/100**"
     lines = [
         "## Score",
         "",
-        f"**{SCORE_NAME}: {report.score.overall}/100**",
+        headline,
         "",
         f"> {SCORE_DISCLAIMER}",
         "",

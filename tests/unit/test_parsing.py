@@ -1,3 +1,5 @@
+import pytest
+
 from web_visibility.parsing import parse_html, parse_json_ld
 
 URL = "https://example.com/blog/post.html"
@@ -228,3 +230,22 @@ def test_content_rich_page_with_scripts_is_not_a_shell() -> None:
     body = "<div id='root'><h1>Server rendered</h1>" + "<p>Real paragraph text.</p>" * 20 + "</div>"
     content = parse("<script src='/app.js'></script>", body)
     assert not content.likely_client_rendered
+
+
+@pytest.mark.parametrize("tag", ["div", "a href='/x'", "h2", "span"])
+def test_deeply_nested_markup_parses_in_linear_time(tag: str) -> None:
+    """A hostile page nesting 20,000 elements must not take quadratic time."""
+    import time
+
+    close = tag.split()[0]
+    depth = 20_000
+    html = f"<html><body>{f'<{tag}>x' * depth}{f'</{close}>' * depth}</body></html>".encode()
+    started = time.perf_counter()
+    content = parse_html(html, URL)
+    assert time.perf_counter() - started < 10  # ~1 s here; quadratic code took minutes
+    assert content.visible_text_length == depth
+
+
+def test_bounded_text_still_reads_normal_link_text() -> None:
+    content = parse(body='<a href="/x"><span>Pricing</span> <em>and</em> <b>plans</b></a>')
+    assert content.links[0].text == "Pricing and plans"

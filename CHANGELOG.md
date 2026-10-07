@@ -8,9 +8,45 @@ it supports.
 
 ## 0.2.0 - Phase 01 hardening
 
-A correctness and security release from an adversarial audit (2 critical,
-5 high, 9 medium, 3 low findings). **Breaking:** report schema 2.0 (see
-`docs/report-format.md` for the full list of changes).
+A correctness and security release from two independent adversarial audits
+(audit #1: 2 critical, 5 high, 9 medium, 3 low; audit #2: 2 high, 6 medium).
+**Breaking:** report schema 2.x (2.1; see `docs/report-format.md` for the full
+list of changes).
+
+### Audit #2 fixes
+- **Malformed input never crashes the audit (N1).** A malformed URL in a link,
+  image, `<base>`, canonical, `Link` header or redirect `Location`
+  (`http://[bad`), or an unusable charset (`charset=bogus`, `hex`) previously
+  raised out of the crawl (no report, exit 1) or made the whole page
+  "unparseable". Such URLs are now invalid values (`malformed-canonical`,
+  `invalid-redirect`), unusable charsets fall back to UTF-8, and an unexpected
+  internal error exits with code 3, a clear message, and no stale report.
+- **What was not observed is never "checked" (N2).** Pages that could not be
+  retrieved or analyzed (network/TLS/protocol errors, SSRF blocks, unsupported
+  encodings, oversized or unparseable bodies, HTTP 401/403/407/429) make the
+  crawl `partial` and are listed in `crawl.unretrieved`. Link targets count as
+  checked only with a definitive answer. A category with fewer measured than
+  unmeasured items is N/A, and the overall score is withheld
+  (`insufficient-coverage`) when less than half the model could be scored. Before:
+  bot protection refusing 19 of 20 pages produced "complete, 92/100, links 20/20".
+  New info rule `pages-access-denied`.
+- **robots.txt wildcard ReDoS (N3).** Patterns are matched in linear time instead
+  of with a backtracking regex that a hostile `Disallow: /*a*a*a*...` rule plus a
+  crafted link could make run for hours.
+- **Client-rendered shells are not scored from nothing (N4).** Page-level
+  categories are N/A when every audited page is a shell; the score is withheld.
+- **Sitemap XML is streamed with a depth limit (N5).** Hostile nesting (no DTD
+  needed) cost ~80x its size in memory (7 MB -> 563 MB); now rejected at depth 32
+  with ~2 MB peak. Large legitimate sitemaps use ~3.5x less memory.
+- **Bounded text reads logos correctly (N6).** The 64-node text budget is no longer
+  spent inside `<svg>`, `<script>`, `<style>` or `<template>`, so
+  `<h1><svg>40 paths</svg>Acme</h1>` is not reported as an empty heading or link.
+- **Install ref (N7).** The documented `@v0.2.0` tag is created with this release;
+  a test keeps every documented install ref equal to the package version, and CI
+  checks that a pushed tag matches the version.
+- **Crawl-delay above the limit means start page only (N8).** Link checks and
+  sitemap fetches no longer continue at 30 s intervals (up to ~50 minutes); the
+  remaining link targets are listed as unchecked.
 
 ### Robots
 - robots.txt is evaluated **per crawler** (Googlebot, Bingbot, GPTBot,
@@ -23,7 +59,8 @@ A correctness and security release from an adversarial audit (2 critical,
 - robots.txt retrieval states: 429, 5xx and network failures mean **no crawling**,
   not "missing". Transient failures are retried once. (M1)
 - Percent-encoding is normalized consistently for rules and URLs (`/%7Ejoe` = `/~joe`). (L2)
-- `Crawl-delay` honoured (up to 30 s; above that, only the start page is fetched). (M8)
+- `Crawl-delay` honoured (up to 30 s; above that, only robots.txt and the start
+  page are requested). (M8, N8)
 
 ### Parsing and rendering
 - Multi-signal detection of client-rendered shells (`client-rendered-shell`).
@@ -48,6 +85,8 @@ A correctness and security release from an adversarial audit (2 critical,
   crawl (`crawl-stopped-early`). Sleep and clock are injectable. (M8)
 - Total body deadline is enforced per received chunk (it previously relied on
   64 KB re-buffering).
+- HTML extraction walks the tree once with bounded per-element text, so deeply
+  nested hostile markup costs linear rather than quadratic time.
 - Same-site redirect adoption is limited to the same host ignoring `www.`. A
   subdomain move is no longer adopted (`user.github.io` ≠ `github.io`). (L1)
 
@@ -87,9 +126,17 @@ A correctness and security release from an adversarial audit (2 critical,
 ### Tests and CI
 - End-to-end regression suite for every finding (`tests/integration/test_hardening.py`),
   a golden finding set for the fixture site, SPA fixtures, SSRF pinning and
-  rebinding tests, and a score sanity matrix. 297 → 418+ tests.
-- CI: actions pinned to commit SHAs, Python 3.11–3.14, a workflow validation test.
-  **GitHub-hosted execution has not been verified yet.** (M9)
+  rebinding tests, parser complexity tests, and a score sanity matrix. 297 → 425 tests (571 after audit #2).
+- Audit #2: `tests/regression/` (each N finding plus the auditor's probe matrices:
+  robots semantics, JS shells, canonicals, crawl failures, Retry-After) and
+  `tests/security/` (SSRF, decompression bombs, hostile XML, ReDoS), all over real
+  local sockets via `tests/live_server.py`.
+- `scripts/mutation_check.py` reverts each audit fix in a scratch copy and fails if
+  the suite does not notice; CI runs it.
+- CI: actions pinned to commit SHAs, Python 3.11–3.14, a workflow validation test,
+  a release-tag/version check, and the mutation job. (M9) The first GitHub run (before
+  these changes) failed: mypy errors since fixed in `parsing.py`, and one CLI test
+  that broke when Rich styles help text under `GITHUB_ACTIONS` (now ANSI-insensitive).
 
 ### Documentation
 - SECURITY.md rewritten with precise guarantees and residual risks. The README

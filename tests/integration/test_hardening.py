@@ -143,7 +143,14 @@ class TestC2ClientRenderedShell:
             issue = one(report, rule_id)
             assert issue.confidence <= RENDER_DEPENDENT_CONFIDENCE
             assert issue.details["render_dependent"] is True
-        assert report.score.status == "partial"
+        # N4 (audit #2): nothing page-level was measurable, so those categories are N/A
+        # and the overall score is withheld rather than computed from technical alone.
+        categories = {c.category.value: c for c in report.score.categories}
+        for name in ("metadata", "structure", "structured_data"):
+            assert categories[name].points is None
+            assert categories[name].coverage.status == "not-scored"
+        assert report.score.overall is None
+        assert report.score.status == "insufficient-coverage"
 
     def test_custom_mount_id_detected_without_root_id(self) -> None:
         report = audit(FakeSite({"/": Route(200, (SPA / "custom-mount-shell.html").read_bytes())}))
@@ -199,7 +206,9 @@ class TestH1DecompressionLimits:
                          "/huge": Route(200, bomb, {**HTML, "content-encoding": "deflate"})})  # fmt: skip
         report = audit(site, fetch={"max_bytes": 500_000})
         assert one(report, "page-too-large").affected_urls == ("https://example.com/huge",)
-        assert report.crawl.state == "complete"
+        # The page was not analyzed, so the audit is partial (N2, audit #2), not complete.
+        assert report.crawl.state == "partial"
+        assert any("could not be retrieved or analyzed" in r for r in report.crawl.state_reasons)
 
     def test_compressed_normal_page_is_decoded(self) -> None:
         html = page(title="Compressed page title here").body

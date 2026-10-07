@@ -75,14 +75,18 @@ explain, and (when asked) plan fixes.
    Useful options: `--max-pages N` (default 20, keep it modest), `--check-external`,
    `--max-link-checks N`, `--timeout S`, `--max-page-bytes N`. Use
    `--ignore-robots` **only** if the user owns the site and asks for it.
-   Exit code 0: an audit was produced. Exit code 1: the crawl **failed** (the
-   report explains why). Exit code 2: invalid URL or option.
+   Exit code 0: an audit was produced (it may still be partial). Exit code 1: the
+   crawl **failed** (the report explains why). Exit code 2: invalid URL or option.
+   Exit code 3: internal error, **no report**: say so, never read an older file.
 
 4. **Read `reports/<host>/audit.json`.** First check `schema_version` starts
    with `2.`. Then read, in this order:
    - `crawl.state` (`complete` / `partial` / `failed`) and `crawl.state_reasons`
-   - `score.status`, `score.overall` and `score.categories.*.coverage` (an N/A
-     category means "not checked", **not** "perfect")
+   - `score.status`, `score.overall`, `score.reason` and
+     `score.categories.*.coverage` (an N/A category means "not checked", **not**
+     "perfect")
+   - `crawl.unretrieved[]`: pages the tool could not observe (blocked, 403/429,
+     network errors). They are coverage gaps, not findings about the site.
    - `issues[]`: `id`, `severity`, `confidence`, `evidence`, `affected_urls`,
      `recommendation`, `verification`, `details`
    - `robots.crawlers[]`: per-crawler access (Googlebot, Bingbot, AI crawlers)
@@ -115,6 +119,9 @@ explain, and (when asked) plan fixes.
 
 - If `crawl.state` is `failed`: say the audit is **incomplete**, give the reason,
   and suggest a retry or fix. Report no score and draw no conclusions about the site.
+- If `score.status` is `insufficient-coverage` (`overall` is `null`): say it is a
+  **partial audit with no score**, quote `score.reason`, and report only the
+  findings for what was observed. Never estimate or invent a score.
 - Otherwise lead with the **Web Visibility Diagnostic Score**, its disclaimer (not
   a ranking prediction), `score.status`, and any N/A or partial categories with
   their `coverage.reason`.

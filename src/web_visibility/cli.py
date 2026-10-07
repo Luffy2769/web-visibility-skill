@@ -6,7 +6,9 @@ Output streams are kept separate so the CLI composes well with other tools:
 * stderr - progress, warnings and errors
 
 Exit codes: 0 = audit completed; 1 = the start URL could not be audited
-(reports are still written); 2 = invalid usage or invalid URL; 130 = interrupted.
+(reports are still written); 2 = invalid usage or invalid URL; 3 = internal error
+(no report; any previous report in the output directory is removed first, so a
+stale file can never be mistaken for this run's result); 130 = interrupted.
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ from web_visibility.reporters import (
     write_json,
     write_markdown,
 )
+from web_visibility.urls import normalize_url
 
 app = typer.Typer(
     name="web-visibility",
@@ -128,6 +131,9 @@ def audit(
     """Crawl a website and report evidence-backed technical findings."""
     err = Console(stderr=True)
     _configure_logging(verbose)
+    directory = output / _directory_name(normalize_url(url) or url) if output is not None else None
+    if directory is not None:
+        _remove_previous_reports(directory)
     try:
         config = CrawlConfig(
             max_pages=max_pages,
@@ -148,10 +154,17 @@ def audit(
     except KeyboardInterrupt:
         err.print("[yellow]Interrupted.[/]")
         raise typer.Exit(130) from None
+    except Exception as exc:  # last resort: never die with a bare traceback and no verdict
+        logging.getLogger(__name__).debug("internal error", exc_info=True)
+        err.print(
+            f"[bold red]Internal error:[/] {escape(type(exc).__name__)}: {escape(str(exc))}. "
+            "No report was written. Re-run with --verbose and please report this as a bug.",
+            highlight=False,
+        )
+        raise typer.Exit(3) from exc
 
     written: list[Path] = []
-    if output is not None:
-        directory = output / _directory_name(report.crawl.start_url)
+    if directory is not None:
         written = [
             write_json(report, directory / "audit.json"),
             write_markdown(report, directory / "audit.md"),
@@ -167,6 +180,11 @@ def audit(
         for path in written:
             err.print(f"Wrote {path}", highlight=False, markup=False)
 
+    if report.auditable and report.score.overall is None:
+        err.print(
+            "[bold yellow]Partial audit:[/] no score was computed - "
+            f"{escape(report.score.reason or report.score.status)}.",
+        )
     if not report.auditable:
         reasons = escape("; ".join(report.crawl.state_reasons))
         err.print(
@@ -198,6 +216,11 @@ def _blocked(report: AuditReport) -> bool:
     return report.crawl.robots.error_kind == "blocked" or (
         start is not None and start.error_kind == "blocked"
     )
+
+
+def _remove_previous_reports(directory: Path) -> None:
+    for name in ("audit.json", "audit.md"):
+        (directory / name).unlink(missing_ok=True)
 
 
 def _directory_name(start_url: str) -> str:

@@ -6,6 +6,7 @@ downstream can silently rewrite what was observed.
 
 from __future__ import annotations
 
+import codecs
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Literal
@@ -22,6 +23,25 @@ _UNSCOPED_COLON_DIRECTIVES = frozenset(
 )
 
 CanonicalSource = Literal["head", "head-implicitly-closed", "body", "http-header"]
+
+#: Statuses that say nothing about a URL's content: access control or rate limiting
+#: (often bot protection reacting to the auditor). Never proof a page works or is broken.
+UNRETRIEVED_STATUSES = frozenset({401, 403, 407, 429})
+#: Fetch errors that are themselves a definitive answer about the URL (it is broken).
+DEFINITIVE_ERROR_KINDS = frozenset({"redirect-loop", "too-many-redirects", "invalid-redirect"})
+
+
+def is_definitive_response(status_code: int | None, error_kind: str | None) -> bool:
+    """True when a response proves something about the URL itself.
+
+    A 2xx/3xx/4xx/5xx status does (even if the body was then too large or
+    unparseable); a redirect loop does. A timeout, connection or TLS failure, an
+    SSRF block, a protocol error, or a 401/403/407/429 does not: the auditor simply
+    could not find out.
+    """
+    if error_kind in DEFINITIVE_ERROR_KINDS:
+        return True
+    return status_code is not None and status_code not in UNRETRIEVED_STATUSES
 
 
 class DiscoverySource(StrEnum):
@@ -69,10 +89,16 @@ class FetchResult:
 
     @property
     def charset(self) -> str | None:
+        """The declared charset, or ``None`` if absent or not a usable text codec.
+
+        The header is server-controlled; ``charset=bogus`` (or a non-text codec such
+        as ``hex``) must fall back to the default rather than raise when decoding.
+        """
         for part in self.headers.get("content-type", "").split(";")[1:]:
             key, _, value = part.partition("=")
-            if key.strip().lower() == "charset" and value.strip():
-                return value.strip().strip("\"'")
+            name = value.strip().strip("\"'")
+            if key.strip().lower() == "charset" and name:
+                return name if _is_text_codec(name) else None
         return None
 
     @property
@@ -266,6 +292,22 @@ class Page:
         return self.status_code is not None and 200 <= self.status_code < 300
 
     @property
+    def unretrieved(self) -> bool:
+        """The auditor could not observe this page (a coverage gap, not a finding).
+
+        True for network/protocol/TLS failures, SSRF blocks, unsupported encodings,
+        oversized or unparseable bodies, and 401/403/407/429 answers. HTTP errors such
+        as 404 or 500 are *observations* about the site and are not included.
+        """
+        if self.error_kind in DEFINITIVE_ERROR_KINDS:
+            return False
+        return self.error is not None or self.status_code in UNRETRIEVED_STATUSES
+
+    @property
+    def unretrieved_reason(self) -> str:
+        return self.error_kind or f"HTTP {self.status_code}"
+
+    @property
     def likely_client_rendered(self) -> bool:
         return bool(self.content and self.content.likely_client_rendered)
 
@@ -382,6 +424,15 @@ class Page:
     @property
     def noindex_for_any_agent(self) -> bool:
         return self.is_noindex or bool(self.noindex_agents)
+
+
+def _is_text_codec(name: str) -> bool:
+    # Not b"".decode(name): CPython skips the codec lookup for empty input.
+    try:
+        info = codecs.lookup(name)
+    except LookupError:
+        return False
+    return bool(getattr(info, "_is_text_encoding", True))  # False for hex, base64, rot13...
 
 
 def parse_link_header_canonicals(header: str | None) -> tuple[str, ...]:

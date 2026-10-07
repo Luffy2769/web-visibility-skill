@@ -88,10 +88,12 @@ def _summary(report: AuditReport) -> Panel:
     if score.overall is not None:
         label = Text(f"{score.overall}/100", style=_score_style(score.overall))
         if score.status == "partial":
-            label += Text(f"  (partial: {score.scored_weight}/100 weight scored)", style="dim")
+            label += Text("  PARTIAL", style="bold yellow")
+            label += Text(f" ({clean(score.reason or '', 100)})", style="dim")
         grid.add_row("Score", label)
     else:
-        grid.add_row("Score", Text("not scored - the audit is incomplete", style="bold red"))
+        why = clean(score.reason or "the audit is incomplete", 140)
+        grid.add_row("Score", Text(f"not scored - {why}", style="bold red"))
     return Panel(grid, title=SCORE_NAME, title_align="left", border_style="blue")
 
 

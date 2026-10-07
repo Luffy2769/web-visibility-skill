@@ -22,9 +22,7 @@ named token; they never predict what a search engine will index.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
-from functools import lru_cache
 from typing import Literal
 from urllib.parse import quote
 
@@ -68,7 +66,7 @@ class RobotsRule:
     """The path as written in the file (for evidence)."""
 
     def matches(self, target: str) -> bool:
-        return _pattern(self.path).match(target) is not None
+        return wildcard_match(self.path, target)
 
     def __str__(self) -> str:
         return f"{'Allow' if self.allow else 'Disallow'}: {self.raw or self.path}"
@@ -248,10 +246,32 @@ def _parse_delay(value: str) -> float | None:
     return delay if delay >= 0 else None
 
 
-@lru_cache(maxsize=4096)
-def _pattern(path: str) -> re.Pattern[str]:
-    """Translate a robots.txt path (with ``*`` and trailing ``$``) to a regex."""
-    anchored = path.endswith("$")
-    body = path[:-1] if anchored else path
-    regex = ".*".join(re.escape(part) for part in body.split("*"))
-    return re.compile(regex + ("$" if anchored else ""))
+def wildcard_match(pattern: str, target: str) -> bool:
+    """Does robots.txt ``pattern`` (``*`` wildcards, optional trailing ``$``) match
+    ``target`` from its start?
+
+    Linear time. ``pattern`` and ``target`` both come from the audited site, so a
+    backtracking regex (``.*a.*a.*a...``) would let a hostile robots.txt plus one
+    crafted link hang the audit. With only ``*`` and an end anchor, matching the
+    ``*``-separated segments greedily at their leftmost position is exact.
+    """
+    anchored = pattern.endswith("$")
+    body = pattern[:-1] if anchored else pattern
+    parts = body.split("*")
+    if len(parts) == 1:
+        return target == body if anchored else target.startswith(body)
+    first, *middle, last = parts
+    if not target.startswith(first):
+        return False
+    position, end = len(first), len(target)
+    if anchored:
+        end -= len(last)
+        if end < position or not target.endswith(last):
+            return False
+    for segment in middle:
+        if segment:
+            found = target.find(segment, position, end)
+            if found < 0:
+                return False
+            position = found + len(segment)
+    return anchored or target.find(last, position) >= 0

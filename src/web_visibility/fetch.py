@@ -173,7 +173,10 @@ class Fetcher:
                     location = response.headers.get("location")
                     if status in REDIRECT_STATUSES and location:
                         chain.append(RedirectHop(current, status))
-                        next_url = _strip_fragment(urljoin(current, location.strip()))
+                        next_url = _resolve_location(current, location)
+                        if next_url is None:
+                            message = f"redirect Location is not a valid URL: {location[:200]!r}"
+                            return _error(url, current, chain, "invalid-redirect", message)
                         if next_url in seen:
                             message = f"redirect loop detected at {next_url}"
                             return _error(url, next_url, chain, "redirect-loop", message)
@@ -369,6 +372,18 @@ def _collect_headers(headers: httpx.Headers) -> dict[str, str]:
         separator = "\n" if name in _NEWLINE_JOINED_HEADERS else ", "
         collected[name] = separator.join(headers.get_list(name))
     return collected
+
+
+def _resolve_location(current: str, location: str) -> str | None:
+    """Absolute redirect target, or ``None`` if the header is not a usable URL.
+
+    ``Location`` is server-controlled: a malformed value (``http://[bad``) must end
+    this fetch with an error, never raise out of the crawl.
+    """
+    try:
+        return _strip_fragment(urljoin(current, location.strip()))
+    except ValueError:
+        return None
 
 
 def _strip_fragment(url: str) -> str:

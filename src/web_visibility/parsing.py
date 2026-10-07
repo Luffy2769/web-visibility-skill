@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Iterator
 from typing import Any
 
 from bs4 import BeautifulSoup, Comment, Declaration, Doctype, Tag
@@ -47,8 +48,10 @@ _SUBRESOURCE_ATTRS = {
 _MAX_RAW_JSON_LD = 20_000  # characters kept per block for reporting
 
 # Bounds for per-element text extraction (headings, links, titles, mount points).
-_TEXT_NODE_BUDGET = 2_000
-_TEXT_CHAR_BUDGET = 1_000
+_TEXT_NODE_BUDGET = 64
+_TEXT_CHAR_BUDGET = 300
+_NO_TEXT_SUBTREES = frozenset({"script", "style", "template"})
+_SVG_TITLE_SCAN = 4  # an accessible <svg> puts <title> first; never scan all its paths
 
 # Elements that make an HTML parser close <head> implicitly and start the body.
 # Python's html.parser does not do this, so placement is tracked explicitly.
@@ -108,6 +111,7 @@ _STRUCTURAL_SIGNALS = frozenset(
 )
 
 Walked = list[tuple[PageElement, int]]
+Tags = list[tuple[Tag, int]]
 
 
 def parse_html(body: bytes | str, url: str, *, encoding: str | None = None) -> PageContent:
@@ -120,18 +124,14 @@ def parse_html(body: bytes | str, url: str, *, encoding: str | None = None) -> P
     base_url = _base_url(soup, url)
     page_host = host_of(url)
     nodes = _walk(soup)
-    tags = [(node, flags) for node, flags in nodes if isinstance(node, Tag)]
+    tags: Tags = [(node, flags) for node, flags in nodes if isinstance(node, Tag)]
 
     html = soup.find("html")
     canonical_links, robots_meta, head_anomalies = _document_order_scan(tags)
     visible_text = _visible_text_length(nodes)
     signals = _render_signals(soup, tags, visible_text)
     return PageContent(
-        titles=tuple(
-            _bounded_text(t)
-            for t, f in tags
-            if t.name == "title" and not f & _IN_SVG  # type: ignore[union-attr]
-        ),
+        titles=tuple(_bounded_text(t) for t, f in tags if t.name == "title" and not f & _IN_SVG),
         meta_descriptions=_meta_contents(tags, "description"),
         canonical_links=canonical_links,
         robots_meta=robots_meta,
@@ -140,9 +140,9 @@ def parse_html(body: bytes | str, url: str, *, encoding: str | None = None) -> P
         render_signals=signals,
         likely_client_rendered=is_likely_shell(signals),
         headings=tuple(
-            Heading(level=int(t.name[1]), text=_bounded_text(t))  # type: ignore[union-attr]
+            Heading(level=int(t.name[1]), text=_bounded_text(t))
             for t, _ in tags
-            if t.name in _HEADING_TAGS  # type: ignore[union-attr]
+            if t.name in _HEADING_TAGS
         ),
         links=_links(tags, base_url, page_host),
         images=_images(tags, base_url),
@@ -177,15 +177,41 @@ def _walk(soup: BeautifulSoup) -> Walked:
     return out
 
 
+def _bounded_descendants(tag: Tag) -> Iterator[PageElement]:
+    """Descendants in document order, at most ``_TEXT_NODE_BUDGET`` of them.
+
+    Not ``tag.descendants``: bs4 first walks to the element's last descendant,
+    which is O(depth) per call and makes nested markup quadratic.
+
+    The budget is not spent inside subtrees that hold no readable text: scripts,
+    styles and templates are skipped, and an ``<svg>`` contributes only its
+    ``<title>``. Otherwise one icon (``<h1><svg>40 paths</svg>Acme</h1>``, a common
+    logo pattern) exhausts the budget and the heading reads as empty.
+    """
+    stack: list[PageElement] = list(reversed(tag.contents))
+    for _ in range(_TEXT_NODE_BUDGET):
+        if not stack:
+            return
+        node = stack.pop()
+        yield node
+        if not isinstance(node, Tag) or node.name in _NO_TEXT_SUBTREES:
+            continue
+        if node.name == "svg":
+            titles = [
+                c for c in node.contents[:_SVG_TITLE_SCAN] if getattr(c, "name", None) == "title"
+            ]
+            stack.extend(reversed(titles))
+        else:
+            stack.extend(reversed(node.contents))
+
+
 def _bounded_text(tag: PageElement) -> str:
     """Text of ``tag``, reading at most a fixed number of nodes and characters."""
     if not isinstance(tag, Tag):
         return ""
     parts: list[str] = []
     chars = 0
-    for index, node in enumerate(tag.descendants):
-        if index >= _TEXT_NODE_BUDGET:
-            break
+    for node in _bounded_descendants(tag):
         if isinstance(node, NavigableString) and not isinstance(
             node, (Comment, Declaration, Doctype)
         ):
@@ -201,16 +227,16 @@ def _bounded_text(tag: PageElement) -> str:
 # --------------------------------------------------------------------------- #
 
 
-def _meta_contents(tags: Walked, name: str) -> tuple[str, ...]:
+def _meta_contents(tags: Tags, name: str) -> tuple[str, ...]:
     return tuple(
-        clean_text(_attr(t, "content") or "")  # type: ignore[arg-type]
+        clean_text(_attr(t, "content") or "")
         for t, _ in tags
-        if t.name == "meta" and (_attr(t, "name") or "").strip().lower() == name  # type: ignore[union-attr, arg-type]
+        if t.name == "meta" and (_attr(t, "name") or "").strip().lower() == name
     )
 
 
 def _document_order_scan(
-    tags: Walked,
+    tags: Tags,
 ) -> tuple[tuple[CanonicalLink, ...], tuple[RobotsMeta, ...], tuple[str, ...]]:
     """Canonicals (with placement), robots meta tags and head anomalies, in order.
 
@@ -223,7 +249,6 @@ def _document_order_scan(
     anomalies: list[str] = []
     body_started = False
     for element, flags in tags:
-        assert isinstance(element, Tag)
         if flags & _IN_OPAQUE:
             continue
         name = element.name
@@ -263,7 +288,7 @@ def _visible_text_length(nodes: Walked) -> int:
     return total
 
 
-def _render_signals(soup: BeautifulSoup, tags: Walked, visible_text: int) -> tuple[str, ...]:
+def _render_signals(soup: BeautifulSoup, tags: Tags, visible_text: int) -> tuple[str, ...]:
     """Evidence that the document is an application shell rendered by JavaScript.
 
     No single signal is decisive (custom mount ids are common), so several are
@@ -273,13 +298,11 @@ def _render_signals(soup: BeautifulSoup, tags: Walked, visible_text: int) -> tup
     if visible_text < _SHELL_TEXT_THRESHOLD:
         signals.append(f"little-visible-text:{visible_text}")
 
-    scripts = [t for t, _ in tags if t.name == "script"]  # type: ignore[union-attr]
+    scripts = [t for t, _ in tags if t.name == "script"]
     external = [
-        t
-        for t in scripts
-        if _attr(t, "src") or (_attr(t, "type") or "").lower() == "module"  # type: ignore[arg-type]
+        t for t in scripts if _attr(t, "src") or (_attr(t, "type") or "").lower() == "module"
     ]
-    content = sum(1 for t, f in tags if t.name in _CONTENT_ELEMENTS and not f & _IN_OPAQUE)  # type: ignore[union-attr]
+    content = sum(1 for t, f in tags if t.name in _CONTENT_ELEMENTS and not f & _IN_OPAQUE)
     if external and len(scripts) >= content:
         signals.append(f"script-driven:{len(scripts)}-scripts")
     if content <= 3:
@@ -300,15 +323,14 @@ def _render_signals(soup: BeautifulSoup, tags: Walked, visible_text: int) -> tup
             signals.append(f"empty-body-containers:{len(children)}")
 
     for t, _ in tags:
-        if t.name == "noscript" and "javascript" in _bounded_text(t).lower():  # type: ignore[union-attr]
+        if t.name == "noscript" and "javascript" in _bounded_text(t).lower():
             signals.append("noscript-javascript-notice")
             break
     return tuple(signals)
 
 
-def _empty_mount_marker(tags: Walked) -> str | None:
+def _empty_mount_marker(tags: Tags) -> str | None:
     for tag, _ in tags:
-        assert isinstance(tag, Tag)
         tag_id = (_attr(tag, "id") or "").lower()
         if tag_id in _MOUNT_IDS:
             marker = f"#{tag_id}"
@@ -331,10 +353,9 @@ def is_likely_shell(signals: tuple[str, ...]) -> bool:
     return {"little-visible-text", "script-driven"} <= kinds and bool(kinds & _STRUCTURAL_SIGNALS)
 
 
-def _links(tags: Walked, base_url: str, page_host: str) -> tuple[Link, ...]:
+def _links(tags: Tags, base_url: str, page_host: str) -> tuple[Link, ...]:
     links = []
     for tag, _ in tags:
-        assert isinstance(tag, Tag)
         if tag.name != "a":
             continue
         href = _attr(tag, "href")
@@ -355,10 +376,9 @@ def _links(tags: Walked, base_url: str, page_host: str) -> tuple[Link, ...]:
     return tuple(links)
 
 
-def _images(tags: Walked, base_url: str) -> tuple[Image, ...]:
+def _images(tags: Tags, base_url: str) -> tuple[Image, ...]:
     images = []
     for tag, flags in tags:
-        assert isinstance(tag, Tag)
         # <noscript> fallbacks duplicate lazy-loaded images; skip them.
         if tag.name != "img" or flags & _IN_NOSCRIPT:
             continue
@@ -379,10 +399,9 @@ def _images(tags: Walked, base_url: str) -> tuple[Image, ...]:
     return tuple(images)
 
 
-def _json_ld(tags: Walked) -> tuple[JsonLdBlock, ...]:
+def _json_ld(tags: Tags) -> tuple[JsonLdBlock, ...]:
     blocks = []
     for tag, _ in tags:
-        assert isinstance(tag, Tag)
         if tag.name != "script" or not _JSON_LD_TYPE.match(_attr(tag, "type") or ""):
             continue
         raw = tag.string if tag.string is not None else tag.get_text()
@@ -443,10 +462,9 @@ def _top_level_entities(data: Any) -> list[dict[str, Any]]:
     return entities
 
 
-def _subresources(tags: Walked, base_url: str) -> tuple[str, ...]:
+def _subresources(tags: Tags, base_url: str) -> tuple[str, ...]:
     values: list[str] = []
     for tag, _ in tags:
-        assert isinstance(tag, Tag)
         attr = _SUBRESOURCE_ATTRS.get(tag.name)
         if attr and (value := _attr(tag, attr)):
             values.append(value)
@@ -500,9 +518,7 @@ def _accessible_name(tag: Tag) -> str:
         value = clean_text(_attr(tag, attr) or "")
         if value:
             return value
-    for index, node in enumerate(tag.descendants):
-        if index >= _TEXT_NODE_BUDGET:
-            break
+    for node in _bounded_descendants(tag):
         if isinstance(node, Tag) and node.name == "img":
             alt = clean_text(_attr(node, "alt") or "")
             if alt:

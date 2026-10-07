@@ -42,7 +42,7 @@ that origin becomes the crawl origin (`crawl.site_url`). Redirects to other
 hosts, including subdomains, are not followed for crawling. The crawler then
 follows same-origin links breadth-first, then sitemap URLs, up to `--max-pages`.
 Fetch failures record their cause (`timeout`, `connection`, `dns`, `ssl`,
-`too-many-redirects`, `too-large`, `unsupported-encoding`, `blocked`). robots.txt
+`too-many-redirects`, `invalid-redirect`, `too-large`, `unsupported-encoding`, `blocked`). robots.txt
 and the start URL are retried once after a transient network failure.
 
 | Rule ID | Severity | Finding |
@@ -356,13 +356,21 @@ Never recommend markup for information the page does not visibly contain.
   partial document would produce false "missing" findings.
 - **Rate control**: a `Retry-After` on 429/503 of up to 30 s is honoured with one
   retry. A longer or repeated 429 stops the crawl. robots.txt `Crawl-delay` is
-  honoured up to 30 s. Above that, only the start page is fetched.
+  honoured up to 30 s. Above that, only robots.txt and the start page are requested (no sitemaps, no link checks; the remaining link targets are listed as unchecked).
 
 | Rule ID | Severity | Finding |
 |---|---|---|
 | `page-too-large` | low | The response exceeded the decompressed size limit and was not analyzed. |
 | `crawl-limit-reached` | info | Stopped at `--max-pages` with URLs pending. Findings cover the crawled subset. |
 | `crawl-stopped-early` | info | Stopped to respect the server (`rate-limited`, `crawl-delay-too-large`). |
+| `pages-access-denied` | info | Crawled pages answered 401/403/429 (often bot protection). They were not audited and count as unmeasured, never as passing. |
+
+**Unmeasured is never "checked".** A page the auditor could not observe (network,
+TLS or protocol failure, SSRF block, unsupported encoding, too large, unparseable,
+or 401/403/407/429) makes `crawl.state` `partial` and is listed in
+`crawl.unretrieved`. A link target answering 401/403/429 or failing at the network
+level is *unverifiable*: it is neither broken nor working. HTTP 404/410/5xx are
+real observations and do not reduce coverage.
 
 When `crawl.state` is `partial`, every site-wide conclusion needs that caveat.
 
@@ -371,10 +379,11 @@ When `crawl.state` is `partial`, every site-wide conclusion needs that caveat.
 The **Web Visibility Diagnostic Score** is coverage-aware:
 
 - Each category reports `coverage.status`: `scored`, `partial`, `not-scored`
-  (applicable items exist but none was checked: links found but not verified, a
-  failed crawl) or `not-applicable` (nothing to check: no images, no links).
-  Both N/A statuses are excluded from the overall score and never treated as full
-  marks. Only `not-scored` makes the score `partial`.
+  (applicable items exist but none was checked, **or fewer were measured than
+  could not be measured**: links found but not verified, pages behind bot
+  protection, client-rendered shells, a failed crawl) or `not-applicable`
+  (nothing to check: no images, no links). Both N/A statuses are excluded from
+  the overall score and never treated as full marks.
 - Category weights: Technical 25, Metadata 20, Structure 15, Links 20,
   Images 10, Structured Data 10.
 - Penalty per issue = `severity weight × confidence × prevalence`. Severity
@@ -382,6 +391,9 @@ The **Web Visibility Diagnostic Score** is coverage-aware:
   up to at most the whole category, so dozens of failures are never hidden
   behind one capped rule.
 - Overall = 100 × scored points ÷ scored maximum. `score.status` is `complete`,
-  `partial` or `not-scored`.
+  `partial`, `insufficient-coverage` or `not-scored`. With
+  `insufficient-coverage`, the scored categories carry less than
+  `score.min_scored_weight` (50) of the model, so `overall` is `null`:
+  report "partial audit, no score" and the `score.reason`. Never estimate one.
 
 It is an internal diagnostic, **not** a ranking, traffic or AI-visibility prediction.

@@ -72,7 +72,7 @@ Details: [docs/architecture.md](docs/architecture.md).
   [reference](.agents/skills/web-visibility/references/technical-seo.md).
 - **Evidence model**: every issue has `evidence`, `affected_urls`, `severity`,
   `confidence`, `recommendation` and `verification`.
-- **Outputs**: Rich terminal report, JSON (versioned schema 2.0), Markdown.
+- **Outputs**: Rich terminal report, JSON (versioned schema 2.1), Markdown.
 
 ## Installation
 
@@ -82,7 +82,7 @@ Requires **Python 3.11+**. The package is not on PyPI.
 
 ```bash
 pipx install git+https://github.com/luffy2769/web-visibility-skill@v0.2.0
-web-visibility --version     # web-visibility 0.2.0 (report schema 2.0)
+web-visibility --version     # web-visibility 0.2.0 (report schema 2.1)
 ```
 
 **For development**:
@@ -119,8 +119,11 @@ web-visibility audit http://localhost:3000 --allow-private-network   # local dev
 | `--allow-private-network` | off | Allow localhost or private IPs (disables SSRF checks). |
 | `--show-info` | off | Include informational notes in the terminal report. |
 
-Exit codes: `0` an audit was produced · `1` the crawl failed (nothing could be
-audited; reports still explain why) · `2` invalid URL or option.
+Exit codes: `0` an audit was produced (check `crawl.state` and `score.status`:
+it may be partial) · `1` the crawl failed (nothing could be audited; reports still
+explain why) · `2` invalid URL or option · `3` internal error (no report is written,
+and any previous `audit.json`/`audit.md` for that host is removed first so a stale
+report is never mistaken for this run).
 
 ## Example output
 
@@ -154,17 +157,18 @@ ISSUES   3 high   6 medium   15 low   8 info
 ```
 
 When links cannot be checked, the category shows **N/A** with a reason, and the
-score is marked partial. It never reports a silent 20/20:
+score is marked partial. It never reports a silent 20/20, and a link target that
+answered 403/429 or timed out is *unverifiable*, never "checked":
 
 ```text
 Links                │     N/A │ not scored │ 0/30 link targets │ link validation was not performed
 ```
 
-## JSON example (schema 2.0)
+## JSON example (schema 2.1)
 
 ```json
 {
-  "schema_version": "2.0",
+  "schema_version": "2.1",
   "crawl": { "state": "complete", "state_reasons": [], "site_url": "https://www.example.com/" },
   "score": {
     "name": "Web Visibility Diagnostic Score",
@@ -203,6 +207,14 @@ Full field reference and versioning policy: [docs/report-format.md](docs/report-
 - An issue costs `severity weight × confidence × prevalence` of its category
   (severity weights: critical 1.0, high 0.75, medium 0.4, low 0.15, info 0).
   Penalties accumulate, so 19 broken links out of 20 cost far more than one.
+- **What could not be observed is never counted as checked.** Pages that failed
+  to download, were refused (401/403/429, often bot protection), were too large or
+  unparseable make the audit `partial` and are listed in `crawl.unretrieved`. A
+  category where fewer items were measured than could not be measured (pages,
+  client-rendered shells, unverifiable links) is N/A.
+- If the scored categories carry less than half of the model (`scored_weight` <
+  50), **no overall score** is computed (`score.status: insufficient-coverage`):
+  for example a site whose bot protection refused every page but the first.
 - A failed crawl (for example an unreachable site or an unavailable robots.txt)
   produces **no score** and an "incomplete audit" state, never a misleading number.
 
@@ -283,9 +295,12 @@ web-visibility-skill/
 │   └── reporters/                   # terminal, json_report, markdown_report
 ├── tests/
 │   ├── unit/                        # module-level tests
-│   ├── integration/                 # fixture site + hardening regressions (real pipeline)
+│   ├── integration/                 # fixture site + audit #1 regressions (real pipeline)
+│   ├── regression/                  # audit #2 findings and probe matrices (real sockets)
+│   ├── security/                    # SSRF, bombs, hostile XML, ReDoS (real sockets)
 │   ├── fixtures/                    # broken site, SPA shells
-│   └── fake_site.py fixture_server.py factories.py
+│   └── fake_site.py live_server.py fixture_server.py factories.py
+├── scripts/mutation_check.py        # reverts each audit fix; the suite must catch every one
 ├── docs/   evals/   .github/workflows/ci.yml
 ```
 
@@ -295,7 +310,8 @@ web-visibility-skill/
 pip install -e ".[dev]"
 ruff check src tests && ruff format --check src tests
 mypy                     # strict
-pytest                   # unit + integration, no internet required
+pytest                   # unit, integration, regression, security; no internet required
+python scripts/mutation_check.py   # every audit fix, reverted, must fail the suite
 ```
 
 - **Unit tests** cover each module, using `httpx.MockTransport` instead of the network.

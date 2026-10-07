@@ -25,7 +25,7 @@ def _workflow() -> dict[str, Any]:
 
 def test_workflow_is_valid_yaml_with_expected_jobs() -> None:
     data = _workflow()
-    assert set(data["jobs"]) == {"lint", "test", "package"}
+    assert set(data["jobs"]) == {"lint", "test", "mutation", "package"}
     assert data["permissions"] == {"contents": "read"}
     for job in data["jobs"].values():
         assert job["runs-on"] and job["steps"]

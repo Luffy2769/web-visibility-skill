@@ -63,8 +63,8 @@ flowchart TD
    redirects to the same host ignoring `www.` (http → https, apex ↔ www), that
    origin becomes `site_url` and its robots.txt replaces the first one.
 3. **Crawl-delay** from the group applying to `WebVisibilitySkill` raises the
-   request delay (up to `max_crawl_delay`, 30 s). Above that, only the start page
-   is fetched (`stop_reason = crawl-delay-too-large`).
+   request delay (up to `max_crawl_delay`, 30 s). Above that, only robots.txt and the start page are requested (no sitemaps, no link checks; the remaining link targets are listed as unchecked)
+   (`stop_reason = crawl-delay-too-large`).
 4. **Sitemaps**: robots.txt `Sitemap:` URLs (declared), sitemap-index children,
    and `/sitemap.xml` (a guess), up to 10 files and 50,000 URLs.
 5. **Pages**: BFS over same-origin links, then same-origin sitemap URLs not yet

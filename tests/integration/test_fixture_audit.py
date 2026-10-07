@@ -172,7 +172,7 @@ def test_cli_json_to_stdout(fixture_site: str) -> None:
     )
     assert result.exit_code == 0
     data = json.loads(result.stdout)
-    assert data["schema_version"] == "2.0"
+    assert data["schema_version"] == "2.1"
 
 
 def test_cli_terminal_report(fixture_site: str) -> None:

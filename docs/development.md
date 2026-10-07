@@ -70,9 +70,15 @@ src/web_visibility/
   reporters/       terminal / JSON / Markdown
 tests/
   factories.py     builders for pages and contexts
+  fake_site.py     in-memory site (httpx.MockTransport) for the full pipeline
+  live_server.py   scriptable server on a real local socket (raw bytes, drops)
   fixture_server.py
   fixtures/site/   intentionally broken website
   unit/  integration/
+  regression/      one test per audit finding, plus the auditors' probe matrices
+  security/        SSRF, bombs, hostile XML, ReDoS (real sockets)
+scripts/
+  mutation_check.py  reverts each audit fix; the suite must fail for every one
 ```
 
 ## Adding an analyzer
@@ -126,6 +132,11 @@ tests/
   the real pipeline with an injected sleeper, so no test waits in real time.
 - **Integration**: add pages to `tests/fixtures/site/` (`{{BASE}}` is replaced
   with the server URL) and extend `EXPECTED` in `tests/integration/test_fixture_audit.py`.
+- **Adversarial regressions** use `tests/live_server.py`: real sockets, so framing,
+  truncation, connection drops and header limits behave as on the network.
+  When you fix a finding, add its reproduction to `tests/regression/` and a
+  mutant that reverts the fix to `scripts/mutation_check.py`; then run
+  `python scripts/mutation_check.py <ID>` to confirm the test catches it.
 
 ## Building the package
 

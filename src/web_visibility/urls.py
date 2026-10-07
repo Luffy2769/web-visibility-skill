@@ -114,10 +114,11 @@ def normalize_url(url: str, base: str | None = None) -> str | None:
         return None
     if is_skipped_scheme(url):
         return None
-    if base is not None:
-        url = urljoin(base, url)
-
     try:
+        # urljoin/urlsplit raise ValueError on malformed authorities ("http://[bad",
+        # "//[x]/"); website markup is untrusted, so that means "not a URL".
+        if base is not None:
+            url = urljoin(base, url)
         parts = urlsplit(url)
         port = parts.port
     except ValueError:

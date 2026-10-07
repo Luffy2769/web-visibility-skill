@@ -93,3 +93,18 @@ def test_declared_cli_and_schema_compatibility_match_the_package(
     assert tuple(int(p) for p in low.split(".")) <= version < tuple(int(p) for p in high.split("."))
     assert metadata["report-schema"] == REPORT_SCHEMA_VERSION.split(".")[0]
     assert f"@v{__version__}" in manifest[0]["compatibility"]  # install command pins this release
+
+
+def test_every_documented_install_ref_pins_this_release() -> None:
+    """Audit #2 N7: SKILL.md pointed at a tag that did not exist. Every pinned ref in
+    the docs must be this version's tag (the release workflow then checks the tag)."""
+    from web_visibility import __version__
+
+    root = Path(__file__).parents[2]
+    docs = [
+        root / "README.md",
+        root / "SECURITY.md",
+        root / ".agents/skills/web-visibility/SKILL.md",
+    ]
+    refs = {ref for doc in docs for ref in re.findall(r"@v(\d+\.\d+\.\d+)", doc.read_text("utf-8"))}
+    assert refs == {__version__}

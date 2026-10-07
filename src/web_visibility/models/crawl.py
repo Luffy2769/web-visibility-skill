@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from typing import Literal
 
 from web_visibility.config import CrawlConfig
-from web_visibility.models.page import FetchResult, Page
+from web_visibility.models.page import FetchResult, Page, is_definitive_response
 from web_visibility.models.robots import RobotsResult
 from web_visibility.models.sitemap import SitemapResult
 
@@ -43,6 +44,11 @@ class CrawlResult:
         return bool(self.pending)
 
     @property
+    def unretrieved_pages(self) -> tuple[Page, ...]:
+        """Crawled pages whose content the auditor could not observe (see ``Page.unretrieved``)."""
+        return tuple(p for p in self.pages if p.unretrieved)
+
+    @property
     def audited_page_count(self) -> int:
         return len({p.final_url for p in self.pages if p.content is not None})
 
@@ -72,8 +78,23 @@ class CrawlResult:
             reasons.append(f"{len(self.pending)} discovered URL(s) not crawled")
         if self.unchecked_links:
             reasons.append(f"{len(self.unchecked_links)} link target(s) not checked")
-        if any(p.error_kind in ("timeout", "connection") for p in self.pages):
-            reasons.append("some pages failed with transient network errors")
+        unverifiable = [
+            r for r in self.link_checks.values()
+            if not is_definitive_response(r.status_code, r.error_kind)
+        ]  # fmt: skip
+        if unverifiable:
+            reasons.append(
+                f"{len(unverifiable)} link target(s) could not be verified "
+                "(401/403/429 or a network-level failure)"
+            )
+        unretrieved = self.unretrieved_pages
+        if unretrieved and self.audited_page_count:
+            kinds = Counter(p.unretrieved_reason for p in unretrieved)
+            breakdown = ", ".join(f"{kind}: {n}" for kind, n in kinds.most_common())
+            reasons.append(
+                f"{len(unretrieved)} of {len(self.pages)} crawled page(s) could not be "
+                f"retrieved or analyzed ({breakdown})"
+            )
         if not self.sitemaps.complete and self.sitemaps.checked:
             reasons.append("sitemap list incomplete")
         if any(p.likely_client_rendered for p in self.pages):

@@ -17,7 +17,12 @@ from web_visibility import REPORT_SCHEMA_VERSION
 from web_visibility.analyzers.crawlability import crawler_access_summary
 from web_visibility.audit import AuditReport
 from web_visibility.models import INDEXING_AGENTS, Category, Issue, Page, Severity, SitemapFile
-from web_visibility.scoring import SCORE_DISCLAIMER, SCORE_NAME, SEVERITY_WEIGHTS
+from web_visibility.scoring import (
+    MIN_SCORED_WEIGHT,
+    SCORE_DISCLAIMER,
+    SCORE_NAME,
+    SEVERITY_WEIGHTS,
+)
 
 SCHEMA_VERSION = REPORT_SCHEMA_VERSION
 MAX_SITEMAP_URLS_IN_REPORT = 1000
@@ -100,6 +105,11 @@ def _crawl_section(report: AuditReport) -> dict[str, Any]:
         "site_url": crawl.site_url,
         "pages_crawled": len(crawl.pages),
         "pages_audited": report.pages_audited,
+        "pages_unretrieved": len(crawl.unretrieved_pages),
+        "unretrieved": [
+            {"url": p.requested_url, "reason": p.unretrieved_reason, "status_code": p.status_code}
+            for p in crawl.unretrieved_pages[:50]
+        ],
         "pages_client_rendered": sum(1 for p in report.context.pages if p.likely_client_rendered),
         "max_pages": config.max_pages,
         "limit_reached": crawl.limit_reached,
@@ -137,6 +147,8 @@ def _score_section(report: AuditReport) -> dict[str, Any]:
         "overall": score.overall,
         "max": 100,
         "scored_weight": score.scored_weight,
+        "min_scored_weight": MIN_SCORED_WEIGHT,
+        "reason": score.reason,
         "disclaimer": SCORE_DISCLAIMER,
         "categories": {
             c.category.value: {
@@ -168,7 +180,8 @@ def _score_section(report: AuditReport) -> dict[str, Any]:
             "severity_weights": {s.value: w for s, w in SEVERITY_WEIGHTS.items()},
             "formula": "category = weight * (1 - min(1, sum(severity_weight * confidence * "
             "prevalence))); overall = 100 * sum(scored points) / sum(scored weights); "
-            "not-scored categories are excluded",
+            "not-scored categories are excluded; overall is withheld "
+            "(status insufficient-coverage) when scored_weight < min_scored_weight",
         },
     }
 

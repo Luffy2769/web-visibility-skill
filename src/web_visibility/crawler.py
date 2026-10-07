@@ -12,7 +12,10 @@ Crawl sequence:
    following sitemap indexes up to a file limit.
 5. Breadth-first crawl over same-origin links, then sitemap URLs not reached
    through links (this is what makes orphan detection possible).
-6. Verify link targets that were not crawled, within a request budget.
+6. Verify link targets that were not crawled, within a request budget. Skipped
+   (targets listed as unchecked) after a 429 or when the Crawl-delay exceeds the
+   limit. With such a Crawl-delay, sitemaps are not fetched either: only
+   robots.txt and the start page are requested.
 
 A 429 that is not resolved by one ``Retry-After`` retry stops the crawl: the
 auditor backs off rather than continuing to hit a server that asked it to slow down.
@@ -60,6 +63,9 @@ __all__ = ["CrawlConfig", "CrawlResult", "Crawler", "InvalidStartURLError"]
 _ROBOTS_TEXT_LIMIT = 20_000  # characters of robots.txt kept in the report
 _HTML_SNIFF = (b"<!doctype html", b"<html")
 _HOST_DOWN_ERRORS = frozenset({"connection", "dns", "ssl", "timeout"})
+# After these, no further request goes to the site: link targets are listed as unchecked.
+# (A rate limit asks us to back off; a Crawl-delay above the limit means "start page only".)
+_STOP_REQUESTING = frozenset({"rate-limited", "crawl-delay-too-large"})
 
 
 class InvalidStartURLError(ValueError):
@@ -101,16 +107,12 @@ class Crawler:
                     robots = self._fetch_robots(moved)
 
             crawl_delay = self._apply_crawl_delay(robots, run)
-            if host_down:
-                sitemaps = SitemapResult(checked=False)
+            if host_down or run.stop_reason == "crawl-delay-too-large":
+                sitemaps = SitemapResult(checked=False)  # nothing requested: no claims
             else:
                 sitemaps = self._fetch_sitemaps(run.site, robots)
             self._crawl_pages(run, robots, sitemaps, start, first)
-            if run.stop_reason == "rate-limited":
-                link_checks: dict[str, FetchResult] = {}
-                unchecked: tuple[str, ...] = ()
-            else:
-                link_checks, unchecked = self._check_links(run, robots)
+            link_checks, unchecked = self._check_links(run, robots)
         finally:
             if self._owns_fetcher:
                 self._fetcher.close()
@@ -411,7 +413,7 @@ class Crawler:
             if self.config.respect_robots and not robots.allows(target, ROBOTS_USER_AGENT_TOKEN):
                 run.skipped[target] = robots.skip_reason
                 continue
-            if budget <= 0 or run.stop_reason == "rate-limited":
+            if budget <= 0 or run.stop_reason in _STOP_REQUESTING:
                 unchecked.append(target)
                 continue
             budget -= 1
@@ -422,7 +424,7 @@ class Crawler:
         if self.config.check_external:
             budget = self.config.max_external_checks
             for target in external:
-                if budget <= 0:
+                if budget <= 0 or run.stop_reason == "crawl-delay-too-large":
                     unchecked.append(target)
                     continue
                 budget -= 1
